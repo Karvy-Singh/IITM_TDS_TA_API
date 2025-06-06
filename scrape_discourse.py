@@ -6,7 +6,7 @@ import time
 import json
 
 # ─────── CONFIGURATION ───────
-DISCOURSE_COOKIE = "EIeFAjTmAQY%2FFxjjaIU3XrlHVORE4nnDLN4JjSAMqi1F%2BudRE0MBeluvXdoWOMjFkbUj4Ousnr4t%2Fv7Ecs7QoFLRROriFMdjtBj7zlDh4KsxH0OKaoLzW4mN8TfX4sT%2Fs3l%2B3FNn%2BKk969BcrBFkeGm7LcjY5DOh%2F6BELLXdgcD3kM1vyIoWpOaTCfSxC2rJx4JrNu4PHyofOBacinWGLi%2BgzCUEk9857RKbvXuy2x5TuOsueCfp7034tqb9AAHbZ2TVAVUjR%2FqkEUz6BYBAXXtzkgK6mD1CmONV7MZO%2FVhLmDuz5nKgtPWqzqw%3D--DmNfpm4hhAJEZyKu--EZSqoSzTTPuSulaM8irWQQ%3D%3D"
+DISCOURSE_COOKIE = ""
 BASE_URL = "https://discourse.onlinedegree.iitm.ac.in"
 
 START = datetime(2025, 1, 1, tzinfo=timezone.utc)
