@@ -20,6 +20,9 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 from nltk.tokenize import sent_tokenize
+from openai import OpenAI
+client = OpenAI(api_key="eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjI0ZjIwMDExMjdAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.Y74CCboue-31JAlwbwCpT-AFlYvinglf636FmsfmLTE",
+                base_url="https://aiproxy.sanand.workers.dev/openai/v1")
 
 # ─────── CONFIGURATION ───────
 
@@ -147,12 +150,46 @@ def search_faiss(index, metadata, model, query, top_k=5):
         results.append((dist, meta))
     return results
 
+def generate_answer(index,metadata,embed_model,question: str, k: int = 5):
+    hits = search_faiss(index, metadata, embed_model, question, top_k=k)
+
+    # Build a compact context block for the LLM
+    context = "\n\n".join(
+        f"[{i+1}] {meta['snippet']}" for i, (_, meta) in enumerate(hits)
+    )
+    prompt = f"""
+    You are a teaching assistant. Answer the student question **concisely**,
+    citing sources in the form [1], [2] … that correspond to the snippets below.
+
+    Question: {question}
+
+    Snippets:
+    {context}
+
+    Answer:
+    """
+
+    completion = client.chat.completions.create(
+        model="gpt-4o-mini",     # or your Ollama model for local runs
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    ).choices[0].message.content
+
+    # Build the links array → only the URLs that were actually cited
+    links = []
+    for i, (_, meta) in enumerate(hits):
+        tag = f"[{i+1}]"
+        if tag in completion:
+            links.append({"url": meta["post_url"], "text": meta["topic_title"]})
+
+    return {"answer": completion, "links": links}
+
 
 if __name__ == "__main__":
     # ─────── 1) Try to load an existing index & metadata ───────
     index, metadata = load_index_and_meta(INDEX_PATH, META_PATH)
 
-    # If not found on disk, build it from the scraped JSON
+    # If not foun/d on disk, build it from the scraped JSON
     if index is None or metadata is None:
         index, metadata = build_index(
             posts_json_path=SCRAPED_JSON_PATH,
@@ -174,18 +211,23 @@ if __name__ == "__main__":
             print("Exiting.")
             break
 
-        # 3) Perform search
-        hits = search_faiss(index, metadata, model, query, top_k=TOP_K)
-        print(f"\nTop {TOP_K} matches:\n")
-        for rank, (dist, meta) in enumerate(hits, start=1):
-            print(f"--- Rank #{rank}  (score: {dist:.4f}) ---")
-            print(f"Topic ID   : {meta['topic_id']}")
-            print(f"Topic Title: {meta['topic_title']}")
-            print(f"Post #     : {meta['post_number']}")
-            print(f"Created At : {meta['created_at']}")
-            print(f"URL        : {meta['post_url']}")
-            snippet = meta["snippet"]
-            print(f"Snippet    : {snippet[:200].strip()}{'…' if len(snippet)>200 else ''}")
-            print()
-        print("───────────────────────────────────────")
+        ans=generate_answer(index,metadata,model,query)
+        print("answer:", ans["answer"])
+        print()
+        print("links", ans["links"])
+
+#         # 3) Perform search
+#         hits = search_faiss(index, metadata, model, query, top_k=TOP_K)
+#         print(f"\nTop {TOP_K} matches:\n")
+#         for rank, (dist, meta) in enumerate(hits, start=1):
+#             print(f"--- Rank #{rank}  (score: {dist:.4f}) ---")
+#             print(f"Topic ID   : {meta['topic_id']}")
+#             print(f"Topic Title: {meta['topic_title']}")
+#             print(f"Post #     : {meta['post_number']}")
+#             print(f"Created At : {meta['created_at']}")
+#             print(f"URL        : {meta['post_url']}")
+#             snippet = meta["snippet"]
+#             print(f"Snippet    : {snippet[:200].strip()}{'…' if len(snippet)>200 else ''}")
+#             print()
+#         print("───────────────────────────────────────")
 
