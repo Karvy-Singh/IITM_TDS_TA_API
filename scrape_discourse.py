@@ -1,120 +1,139 @@
-import asyncio
-import aiohttp
-import json
-from datetime import datetime, timezone
+import requests
+from bs4 import BeautifulSoup
+from datetime import datetime
 from tqdm import tqdm
+import json
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
 
-DISCOURSE_COOKIE = "YOUR_DISCOURSE_SESSION_COOKIE_HERE"  # <--- PUT YOUR COOKIE HERE
-BASE_URL = "https://discourse.onlinedegree.iitm.ac.in"
-CATEGORY_SLUG = "courses/tds-kb"
-CATEGORY_ID = 34
-START_DATE = datetime(2025, 1, 1, tzinfo=timezone.utc)
-END_DATE = datetime(2025, 4, 14, 23, 59, 59, tzinfo=timezone.utc)
+# ========== CONFIG ==========
 
-HEADERS = {"User-Agent": "Mozilla/5.0"}
-CONCURRENT_REQUESTS = 10  # Reduce if you hit rate limits often
+COOKIES = {
+    "_t": "xYGydsn3sg1RpkkzR919gL2x43%2BVGPWB%2BcaOlAC4HdFdFGR7F9nKBWweHVAscvlLdfnyyKEuvkFMWQnXLt6wkV8Sz3ouOFf%2B2S0XUgrR%2BDHjOcOgBcQXN7djsyfeZspIo8E6elzBk2aP3qzDOy7DO9TRN%2BsJsVBUBWK5avnONStdBXhFRfhX%2F%2FOmKemrY3rrRHruwsYPyG0Ji4ShdA%2BZ%2FczHmEa4W7LZ6NW8Q%2Bro6kwUzP0095b0PvOuv4sqd8gPqpE8PqP0Pnq5T5OsqQZ8UEWVaKLjnOcO6CdVmRaGVO9MMhVMK3VZhaYtLrs%3D--RKaBQC%2BLcKlj6P1z--BfS5jjv73HfKcJVDQtjJbA%3D%3D"
+}
 
-async def fetch_json(session, url, max_retries=5, **kwargs):
-    retry_count = 0
-    while retry_count < max_retries:
-        async with session.get(url, **kwargs) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            elif resp.status == 429:
-                retry_after = resp.headers.get("Retry-After")
-                wait_time = int(retry_after) if retry_after and retry_after.isdigit() else 60
-                print(f"Received 429 for {url}. Waiting {wait_time} seconds before retrying... (retry {retry_count+1}/{max_retries})")
-                await asyncio.sleep(wait_time)
-                retry_count += 1
-            else:
-                print(f"Failed GET {url}: {resp.status}")
-                return None
-    print(f"Max retries exceeded for {url}")
-    return None
+BASE_URL = "https://discourse.onlinedegree.iitm.ac.in/c/courses/tds-kb/34"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+}
 
-async def fetch_all_topics(session):
-    print("Fetching topics...")
-    topics = []
+START_DATE = datetime(2025, 1, 1)
+END_DATE   = datetime(2025, 4, 14)
+
+OUTPUT_FILE = "discourse_filtered_posts.jsonl"
+
+# How many threads to use for fetching post‐chunks
+MAX_WORKERS = 4
+
+# backoff_factor used by urllib3.Retry (for exponential backoff between retries)
+BACKOFF_FACTOR = 1
+
+# ========== SET UP SESSION WITH RETRY ==========
+
+session = requests.Session()
+session.headers.update(HEADERS)
+session.cookies.update(COOKIES)
+
+retry_strategy = Retry(
+    total=5,
+    backoff_factor=BACKOFF_FACTOR,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "HEAD", "OPTIONS"],
+    respect_retry_after_header=True,
+)
+adapter = HTTPAdapter(max_retries=retry_strategy)
+session.mount("https://", adapter)
+session.mount("http://", adapter)
+
+def safe_get(url, **kwargs):
+    """Wrapper around session.get to catch unexpected 429s and back off."""
+    resp = session.get(url, **kwargs)
+    if resp.status_code == 429:
+        wait = int(resp.headers.get("Retry-After", 5))
+        print(f"Received 429; backing off for {wait} seconds...")
+        time.sleep(wait)
+        resp = session.get(url, **kwargs)  # one more try
+    resp.raise_for_status()
+    return resp
+
+# ========== HELPER FUNCTIONS ==========
+
+def get_topic_urls(base_url):
+    topic_urls = set()
     page = 0
     while True:
-        url = f"{BASE_URL}/c/{CATEGORY_SLUG}/{CATEGORY_ID}.json?page={page}"
-        data = await fetch_json(session, url)
-        if not data:
+        url = f"{base_url}.json?page={page}"
+        print(f"Fetching topic list page {page}...")
+        data = safe_get(url).json()
+        topics = data.get("topic_list", {}).get("topics", [])
+        if not topics:
             break
-        topic_list = data.get("topic_list", {}).get("topics", [])
-        if not topic_list:
-            break
-        topics.extend(topic_list)
-        print(f"Fetched {len(topic_list)} topics from page {page}")
+        for t in topics:
+            topic_urls.add(f"https://discourse.onlinedegree.iitm.ac.in/t/{t['slug']}/{t['id']}")
         page += 1
-    print(f"Total topics fetched: {len(topics)}")
-    return topics
+        time.sleep(1)  # gentle paging
+    return list(topic_urls)
 
-async def fetch_topic_posts(session, topic_id):
-    url = f"{BASE_URL}/t/{topic_id}.json"
-    topic_json = await fetch_json(session, url)
-    if not topic_json:
-        return []
-    posts_count = topic_json['posts_count']
-    post_ids = list(range(1, posts_count + 1))
+def fetch_post_chunk(topic_id, slug, chunk):
+    """Fetch up to 20 posts by ID in one request."""
+    ids = "&".join(f"post_ids[]={pid}" for pid in chunk)
+    url = f"https://discourse.onlinedegree.iitm.ac.in/t/{topic_id}/posts.json?{ids}"
+    resp = safe_get(url)
+    return resp.json().get("post_stream", {}).get("posts", [])
 
-    posts = []
-    BATCH_SIZE = 50  # Discourse default per request
-    for i in range(0, len(post_ids), BATCH_SIZE):
-        nums = post_ids[i:i+BATCH_SIZE]
-        nums_param = ",".join(str(num) for num in nums)
-        posts_url = f"{BASE_URL}/t/{topic_id}/posts.json?post_numbers={nums_param}"
-        posts_json = await fetch_json(session, posts_url)
-        if not posts_json:
-            continue
-        these_posts = posts_json.get("post_stream", {}).get("posts", [])
-        posts.extend(these_posts)
-    return posts
+def parse_posts_from_topic(topic_url):
+    slug, topic_id = topic_url.rstrip("/").rsplit("/", 1)
+    meta = safe_get(f"https://discourse.onlinedegree.iitm.ac.in/t/{topic_id}.json").json()
+    post_ids = meta.get("post_stream", {}).get("stream", [])
+    posts_data = []
 
-def filter_posts_by_date(posts):
-    filtered = []
-    for post in posts:
-        created = datetime.fromisoformat(post["created_at"].replace("Z", "+00:00"))
-        if START_DATE <= created <= END_DATE:
-            filtered.append(post)
-    return filtered
+    # break into 20‐ID chunks
+    chunks = [post_ids[i:i+20] for i in range(0, len(post_ids), 20)]
 
-async def main():
-    cookies = {"_t": DISCOURSE_COOKIE}
-    connector = aiohttp.TCPConnector(limit=CONCURRENT_REQUESTS)
-    async with aiohttp.ClientSession(headers=HEADERS, cookies=cookies, connector=connector) as session:
-        topics = await fetch_all_topics(session)
-        all_posts = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_chunk = {
+            executor.submit(fetch_post_chunk, topic_id, meta["slug"], chunk): chunk
+            for chunk in chunks
+        }
+        for future in as_completed(future_to_chunk):
+            for post in future.result():
+                created = datetime.strptime(post["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ")
+                if START_DATE <= created <= END_DATE:
+                    posts_data.append({
+                        "id": post["id"],
+                        "topic_id": post["topic_id"],
+                        "url": f"https://discourse.onlinedegree.iitm.ac.in/t/{meta['slug']}/{post['post_number']}",
+                        "username": post.get("username"),
+                        "content": BeautifulSoup(post["cooked"], "html.parser").get_text(),
+                        "created_at": post["created_at"],
+                    })
+            time.sleep(0.2)  # small pause per‐chunk to be extra polite
 
-        sem = asyncio.Semaphore(CONCURRENT_REQUESTS)
+    return posts_data
 
-        async def fetch_and_process_topic(topic):
-            async with sem:
-                topic_id = topic["id"]
-                topic_title = topic["title"]
-                posts = await fetch_topic_posts(session, topic_id)
-                posts_in_range = filter_posts_by_date(posts)
-                if posts_in_range:
-                    print(f"Topic '{topic_title}': {len(posts_in_range)} posts in date range.")
-                    for post in posts_in_range:
-                        all_posts.append({
-                            "topic_id": topic_id,
-                            "topic_title": topic_title,
-                            "post_number": post["post_number"],
-                            "username": post["username"],
-                            "created_at": post["created_at"],
-                            "cooked": post["cooked"],
-                            "raw": post.get("raw", ""),
-                        })
+# ========== MAIN ==========
 
-        tasks = [fetch_and_process_topic(topic) for topic in topics]
-        for f in tqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Processing topics"):
-            await f
+def main():
+    all_posts = []
+    topic_urls = get_topic_urls(BASE_URL)
+    print(f"\nFound {len(topic_urls)} topics. Scraping posts...\n")
 
-        print(f"\nSaving {len(all_posts)} posts to 'discourse_posts.json'...")
-        with open("discourse_posts.json", "w", encoding="utf-8") as f:
-            json.dump(all_posts, f, indent=2, ensure_ascii=False)
-        print("Done!")
+    for url in tqdm(topic_urls):
+        try:
+            all_posts.extend(parse_posts_from_topic(url))
+        except Exception as e:
+            print(f"Error on {url}: {e}")
+        time.sleep(0.5)  # per‐topic delay
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        for p in all_posts:
+            json.dump(p, f)
+            f.write("\n")
+
+    print(f"\n✅ Done — {len(all_posts)} posts saved to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
+
