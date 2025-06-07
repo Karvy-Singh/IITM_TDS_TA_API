@@ -16,6 +16,10 @@ import pickle
 from datetime import datetime
 from tqdm import tqdm
 
+from fastapi import FastAPI
+import base64
+from io import BytesIO
+
 import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
@@ -27,7 +31,7 @@ client = OpenAI(api_key="eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjI0ZjIwMDExMjdAZHMuc3
 # ─────── CONFIGURATION ───────
 
 # 1) Path to your scraped JSON file that you generated earlier:
-SCRAPED_JSON_PATH = "tds_discourse_posts.json"
+SCRAPED_JSON_PATH = "discourse_filtered_posts.jsonl"
 
 # 2) Where to save the FAISS index + metadata (so you don't rebuild every time)
 INDEX_PATH    = "tds_discourse_index.faiss"
@@ -40,6 +44,30 @@ EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 TOP_K = 5
 
 # ─────── HELPERS ───────
+
+from PIL import Image, ImageFilter, ImageOps
+import io, base64
+
+def preprocess_image(b64: str) -> Image.Image:
+    data = base64.b64decode(b64)
+    img  = Image.open(io.BytesIO(data)).convert("RGB")
+    # Optional: deskew / enhance contrast / remove noise
+    img = img.filter(ImageFilter.MedianFilter())
+    img = ImageOps.autocontrast(img, cutoff=2)
+    return img
+
+from transformers import BlipProcessor, BlipForConditionalGeneration
+import torch
+
+# load once at startup
+processor = BlipProcessor.from_pretrained("Salesforce/blip2-flan-t5-xl")
+model     = BlipForConditionalGeneration.from_pretrained("Salesforce/blip2-flan-t5-xl").to("cuda")
+
+def vqa_answer(image: Image.Image, question: str) -> str:
+    inputs = processor(images=image, text=question, return_tensors="pt").to("cuda")
+    out    = model.generate(**inputs, max_new_tokens=64)
+    return processor.decode(out[0], skip_special_tokens=True)
+
 
 def chunk_text(text, max_len_chars=500):
     """
@@ -74,7 +102,7 @@ def build_index(posts_json_path, model_name, index_path, meta_path):
 
     print(f"Loading scraped posts from '{posts_json_path}' …")
     with open(posts_json_path, "r", encoding="utf‐8") as f:
-        posts = json.load(f)
+        posts = posts = [json.loads(line) for line in f if line.strip()]
 
     # 2) Chunk each post into smaller snippets
     print(f"Chunking {len(posts)} posts into snippets…")
@@ -157,6 +185,8 @@ def generate_answer(index,metadata,embed_model,question: str, k: int = 5):
     context = "\n\n".join(
         f"[{i+1}] {meta['snippet']}" for i, (_, meta) in enumerate(hits)
     )
+
+    
     prompt = f"""
     You are a teaching assistant. Answer the student question **concisely**,
     citing sources in the form [1], [2] … that correspond to the snippets below.
@@ -184,9 +214,10 @@ def generate_answer(index,metadata,embed_model,question: str, k: int = 5):
 
     return {"answer": completion, "links": links}
 
+app = FastAPI()
 
-if __name__ == "__main__":
-    # ─────── 1) Try to load an existing index & metadata ───────
+@app.post("/api")
+def qa_endpoint(payload: dict):
     index, metadata = load_index_and_meta(INDEX_PATH, META_PATH)
 
     # If not foun/d on disk, build it from the scraped JSON
@@ -201,20 +232,54 @@ if __name__ == "__main__":
     # Load the same SentenceTransformer model for querying
     model = SentenceTransformer(EMBED_MODEL_NAME)
 
-    print("\n====== FAISS SEARCH READY ======\n")
+    question = payload["question"]
+    if img_b64 := payload.get("image"):
+        img = preprocess_image(img_b64)
 
-    # ─────── 2) Enter interactive loop for user questions ───────
-    print("Type a question (or 'exit' to quit):")
-    while True:
-        query = input("\n> ").strip()
-        if query.lower() in ("exit", "quit"):
-            print("Exiting.")
-            break
+        ocr_text = pytesseract.image_to_string(img).strip()
+        vqa_text = vqa_answer(img, question)
 
-        ans=generate_answer(index,metadata,model,query)
-        print("answer:", ans["answer"])
-        print()
-        print("links", ans["links"])
+        image_context = f""" OCR extracted:
+                        {ocr_text or '<none>'}
+                        Vision-model summary:
+                        {vqa_text}
+                        """
+        question += f"\n\n(Attached image's context)\n\n{image_context}"
+
+    response = generate_answer(index,metadata,model,question)
+    return response
+
+
+# if __name__ == "__main__":
+#     # ─────── 1) Try to load an existing index & metadata ───────
+#     index, metadata = load_index_and_meta(INDEX_PATH, META_PATH)
+# 
+#     # If not foun/d on disk, build it from the scraped JSON
+#     if index is None or metadata is None:
+#         index, metadata = build_index(
+#             posts_json_path=SCRAPED_JSON_PATH,
+#             model_name=EMBED_MODEL_NAME,
+#             index_path=INDEX_PATH,
+#             meta_path=META_PATH
+#         )
+# 
+#     # Load the same SentenceTransformer model for querying
+#     model = SentenceTransformer(EMBED_MODEL_NAME)
+# 
+#     print("\n====== FAISS SEARCH READY ======\n")
+# 
+#     # ─────── 2) Enter interactive loop for user questions ───────
+#     print("Type a question (or 'exit' to quit):")
+#     while True:
+#         query = input("\n> ").strip()
+#         if query.lower() in ("exit", "quit"):
+#             print("Exiting.")
+#             break
+# 
+#         ans=generate_answer(index,metadata,model,query)
+#         print("answer:", ans["answer"])
+#         print()
+#         print("links", ans["links"])
 
 #         # 3) Perform search
 #         hits = search_faiss(index, metadata, model, query, top_k=TOP_K)
