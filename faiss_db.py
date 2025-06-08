@@ -48,26 +48,17 @@ TOP_K = 5
 from PIL import Image, ImageFilter, ImageOps
 import io, base64
 
-def preprocess_image(b64: str) -> Image.Image:
-    data = base64.b64decode(b64)
-    img  = Image.open(io.BytesIO(data)).convert("RGB")
-    # Optional: deskew / enhance contrast / remove noise
-    img = img.filter(ImageFilter.MedianFilter())
-    img = ImageOps.autocontrast(img, cutoff=2)
-    return img
-
-from transformers import BlipProcessor, BlipForConditionalGeneration
-import torch
-
-# load once at startup
-processor = BlipProcessor.from_pretrained("Salesforce/blip2-flan-t5-xl")
-model     = BlipForConditionalGeneration.from_pretrained("Salesforce/blip2-flan-t5-xl").to("cuda")
-
-def vqa_answer(image: Image.Image, question: str) -> str:
-    inputs = processor(images=image, text=question, return_tensors="pt").to("cuda")
-    out    = model.generate(**inputs, max_new_tokens=64)
-    return processor.decode(out[0], skip_special_tokens=True)
-
+def process_image(base64_image: str) -> str:
+    prompt= [
+                {"type": "text", "text": "Please extract the text from this image. Return it exactly as it appears."},
+                {"type": "image_url", "image_url": {"url": f"{base64_image}"}}
+            ]
+    completion = client.chat.completions.create(
+        model="gpt-4o-mini",     
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2
+    )
+    return completion.choices[0].message.content
 
 def chunk_text(text, max_len_chars=500):
     """
@@ -265,16 +256,9 @@ def qa_endpoint(payload: dict):
 
     question = payload["question"]
     if img_b64 := payload.get("image"):
-        img = preprocess_image(img_b64)
 
-        ocr_text = pytesseract.image_to_string(img).strip()
-        vqa_text = vqa_answer(img, question)
+        image_context = process_image(img_b64)
 
-        image_context = f""" OCR extracted:
-                        {ocr_text or '<none>'}
-                        Vision-model summary:
-                        {vqa_text}
-                        """
         question += f"\n\n(Attached image's context)\n\n{image_context}"
 
     response = generate_answer(index,metadata,model,question)
