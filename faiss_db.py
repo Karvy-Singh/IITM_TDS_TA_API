@@ -25,7 +25,7 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from nltk.tokenize import sent_tokenize
 from openai import OpenAI
-client = OpenAI(api_key="eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjI0ZjIwMDExMjdAZHMuc3R1ZHkuaWl0bS5hYy5pbiJ9.xJoqjnl3dcuRcZfdQ46I7sEH7N--qvq0pprsqunP5P8",
+client = OpenAI(api_key="",
                 base_url="https://aipipe.org/openai/v1/chat/completions")
 
 # ─────── CONFIGURATION ───────
