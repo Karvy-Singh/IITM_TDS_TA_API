@@ -31,7 +31,7 @@ client = OpenAI(api_key="eyJhbGciOiJIUzI1NiJ9.eyJlbWFpbCI6IjI0ZjIwMDExMjdAZHMuc3
 # ─────── CONFIGURATION ───────
 
 # 1) Path to your scraped JSON file that you generated earlier:
-SCRAPED_JSON_PATH = "discourse_filtered_posts.jsonl"
+SCRAPED_JSON_PATHS = ["./discourse_filtered_posts.jsonl","./course_content.jsonl"]
 
 # 2) Where to save the FAISS index + metadata (so you don't rebuild every time)
 INDEX_PATH    = "tds_discourse_index.faiss"
@@ -87,52 +87,83 @@ def chunk_text(text, max_len_chars=500):
         chunks.append(current.strip())
     return chunks
 
-
-def build_index(posts_json_path, model_name, index_path, meta_path):
+def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=500):
     """
-    1) Load the scraped posts JSON.
-    2) Chunk each post into snippets.
-    3) Embed all snippets with sentence-transformers.
-    4) Build & save a FAISS index + metadata.
+    1) Load all JSONL files in jsonl_paths.
+    2) For each record, detect its schema and normalize into a common metadata dict.
+    3) Chunk each post.content into snippets.
+    4) Embed all snippets.
+    5) Build & save a single FAISS index + single metadata list.
     """
-    # 1) Load scraped posts
-    if not os.path.exists(posts_json_path):
-        print(f"ERROR → could not find '{posts_json_path}'. Exiting.")
-        sys.exit(1)
+    # 1) Load & normalize posts
+    print(f"Loading JSONL from: {jsonl_paths!r}")
+    normalized_posts = []
+    for p in jsonl_paths:
+        if not os.path.exists(p):
+            print(f"ERROR → could not find '{p}'. Exiting.")
+            sys.exit(1)
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                post = json.loads(line)
+                # schema A?
+                if "topic_id" in post:
+                    normalized_posts.append({
+                        "content":     post.get("content",      ""),
+                        "post_url":    post.get("post_url",     ""),
+                        "topic_id":    post.get("topic_id",     ""),
+                        "topic_title": post.get("topic_title",  ""),
+                        "post_number": post.get("post_number",  ""),
+                        "created_at":  post.get("created_at",   ""),
+                        "_source":     os.path.basename(p),
+                    })
+                # schema B?
+                elif "content" in post and "url" in post:
+                    normalized_posts.append({
+                        "content":     post["content"],
+                        "post_url":    post.get("url",           ""),
+                        "topic_id":    "",
+                        "topic_title": "",
+                        "post_number": "",
+                        "created_at":  "",
+                        "_source":     os.path.basename(p),
+                    })
+                else:
+                    # if you have other schemas, handle them here (or skip)
+                    print(f"WARNING → skipping unrecognized record in {p}: {post.keys()}")
+    print(f"Loaded and normalized {len(normalized_posts)} posts.")
 
-    print(f"Loading scraped posts from '{posts_json_path}' …")
-    with open(posts_json_path, "r", encoding="utf‐8") as f:
-        posts = posts = [json.loads(line) for line in f if line.strip()]
-
-    # 2) Chunk each post into smaller snippets
-    print(f"Chunking {len(posts)} posts into snippets…")
+    # 2) Chunk into snippets + collect metadata
+    print(f"Chunking posts into snippets (max {max_len_chars} chars)…")
     all_snippets = []
     metadata     = []
-
-    for post in tqdm(posts):
-        text   = post.get("content", "")
-        chunks = chunk_text(text, max_len_chars=500)  # ~500 characters per chunk
-
+    for post in tqdm(normalized_posts):
+        text = post["content"]
+        chunks = chunk_text(text, max_len_chars=max_len_chars)
         for snippet in chunks:
             all_snippets.append(snippet)
-            metadata.append({
-                "topic_id": post.get("topic_id", ""),
-                "topic_title": post.get("topic_title", ""),
-                "post_number": post.get("post_number", ""),
-                "created_at": post.get("created_at", ""),
-                "post_url": post.get("post_url", ""),
-                "snippet": snippet
-            })
+            # for each snippet, carry over the normalized metadata
+            md = {
+                "snippet":     snippet,
+                "post_url":    post["post_url"],
+                "topic_id":    post["topic_id"],
+                "topic_title": post["topic_title"],
+                "post_number": post["post_number"],
+                "created_at":  post["created_at"],
+                "source_file": post["_source"],
+            }
+            metadata.append(md)
 
-    # 3) Embed all snippets
-    print(f"Loading SentenceTransformer model '{model_name}' …")
+    # 3) Embed
+    print(f"Loading SentenceTransformer('{model_name}') …")
     model = SentenceTransformer(model_name)
-    print(f"Encoding {len(all_snippets)} snippets (this may take a minute)…")
+    print(f"Encoding {len(all_snippets)} snippets …")
     embeddings = model.encode(all_snippets, convert_to_numpy=True)
 
-    # 4) Build FAISS index (L2 / cosine via normalized vectors)
+    # 4) Build FAISS index
     d = embeddings.shape[1]
-    print(f"Building FAISS Index (dimension = {d}) …")
+    print(f"Building FAISS Index (dim={d}) …")
     index = faiss.IndexFlatL2(d)
     index.add(embeddings.astype("float32"))
 
@@ -223,7 +254,7 @@ def qa_endpoint(payload: dict):
     # If not foun/d on disk, build it from the scraped JSON
     if index is None or metadata is None:
         index, metadata = build_index(
-            posts_json_path=SCRAPED_JSON_PATH,
+            jsonl_paths=SCRAPED_JSON_PATHS,
             model_name=EMBED_MODEL_NAME,
             index_path=INDEX_PATH,
             meta_path=META_PATH
