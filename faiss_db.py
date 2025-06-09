@@ -15,19 +15,22 @@ import sys
 import pickle
 from datetime import datetime
 from tqdm import tqdm
+from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
 from fastapi import FastAPI
 import base64
 from io import BytesIO
 
 import numpy as np
+import onnxruntime as ort
 import faiss
 from sentence_transformers import SentenceTransformer
+from optimum.onnxruntime import ORTModelForCausalLM, ORTConfig
+from transformers import AutoTokenizer
 from nltk.tokenize import sent_tokenize
 from openai import OpenAI
 client = OpenAI(api_key="",
-                base_url="https://aipipe.org/openai/v1/chat/completions")
-
+                base_url="https://aiproxy.sanand.workers.dev/openai/v1")
 # ─────── CONFIGURATION ───────
 
 # 1) Path to your scraped JSON file that you generated earlier:
@@ -38,7 +41,30 @@ INDEX_PATH    = "tds_discourse_index.faiss"
 META_PATH     = "tds_discourse_metadata.pkl"
 
 # 3) Which sentence‐transformer model to use for embeddings:
-EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
+tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME, trust_remote_code=True)
+onnx_session = ort.InferenceSession("./all-MiniLM-L6-v2-onnx/model.onnx", providers=["CPUExecutionProvider"])
+
+def embed_texts(texts):
+    """
+    Tokenize and run texts through ONNX model, then mean-pool to get embeddings.
+    Returns float32 numpy array of shape (len(texts), hidden_dim).
+    """
+    # 1) Tokenize
+    inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="np")
+
+    # 2) Filter to only the inputs the ONNX model actually has
+    ort_input_names = {inp.name for inp in onnx_session.get_inputs()}
+    onnx_inputs = {k: v for k, v in inputs.items() if k in ort_input_names}
+
+    # 3) Run
+    outputs = onnx_session.run(None, onnx_inputs)[0]  # (batch, seq_len, dim)
+
+    # 4) Mean‐pool
+    mask = inputs["attention_mask"][..., None]
+    masked = outputs * mask
+    embeddings = masked.sum(axis=1) / mask.sum(axis=1)
+    return embeddings.astype("float32")
 
 # 4) How many search hits to return:
 TOP_K = 5
@@ -185,23 +211,18 @@ def load_index_and_meta(index_path, meta_path):
     return index, metadata
 
 
-def search_faiss(index, metadata, model, query, top_k=5):
-    """
-    1) Embed the query
-    2) Run FAISS search
-    3) Return a list of (score, metadata) for the top_k hits
-    """
-    q_emb = model.encode([query], convert_to_numpy=True).astype("float32")
+def search_faiss(index, metadata, query, top_k=TOP_K):
+    # Embed query with ONNX
+    q_emb = embed_texts([query])
     D, I = index.search(q_emb, top_k)
-    # D: squared L2 distances, I: indices in metadata
     results = []
     for dist, idx in zip(D[0], I[0]):
         meta = metadata[idx]
         results.append((dist, meta))
     return results
 
-def generate_answer(index,metadata,embed_model,question: str, k: int = 5):
-    hits = search_faiss(index, metadata, embed_model, question, top_k=k)
+def generate_answer(index,metadata,question: str, k: int = 5):
+    hits = search_faiss(index, metadata, question, top_k=k)
 
     # Build a compact context block for the LLM
     context = "\n\n".join(
@@ -237,12 +258,11 @@ def generate_answer(index,metadata,embed_model,question: str, k: int = 5):
     return {"answer": completion, "links": links}
 
 app = FastAPI()
+# 1) Load tokenizer (same as HF)
 
 @app.post("/api")
 def qa_endpoint(payload: dict):
     index, metadata = load_index_and_meta(INDEX_PATH, META_PATH)
-
-    # If not foun/d on disk, build it from the scraped JSON
     if index is None or metadata is None:
         index, metadata = build_index(
             jsonl_paths=SCRAPED_JSON_PATHS,
@@ -251,19 +271,13 @@ def qa_endpoint(payload: dict):
             meta_path=META_PATH
         )
 
-    # Load the same SentenceTransformer model for querying
-    model = SentenceTransformer(EMBED_MODEL_NAME)
-
-    question = payload["question"]
+    question = payload.get("question", "")
     if img_b64 := payload.get("image"):
-
         image_context = process_image(img_b64)
-
         question += f"\n\n(Attached image's context)\n\n{image_context}"
 
-    response = generate_answer(index,metadata,model,question)
+    response = generate_answer(index, metadata, question)
     return response
-
 
 # if __name__ == "__main__":
 #     # ─────── 1) Try to load an existing index & metadata ───────
@@ -272,7 +286,7 @@ def qa_endpoint(payload: dict):
 #     # If not foun/d on disk, build it from the scraped JSON
 #     if index is None or metadata is None:
 #         index, metadata = build_index(
-#             posts_json_path=SCRAPED_JSON_PATH,
+#             jsonl_paths=SCRAPED_JSON_PATHS,
 #             model_name=EMBED_MODEL_NAME,
 #             index_path=INDEX_PATH,
 #             meta_path=META_PATH
