@@ -1,0 +1,25 @@
+# Core dependencies
+fastapi
+tqdm
+python-dotenv
+nltk
+pillow
+numpy
+onnxruntime
+faiss-cpu
+sentence-transformers
+optimum[onnxruntime]
+transformers
+
+# Optional (or environment-specific)
+openai
+
+# If using Python 3.8+
+typing-extensions
+
+# Ensure to install compatible tokenizer for transformers
+protobuf
+
+# If running the FastAPI app with uvicorn
+uvicorn[standard]
+
