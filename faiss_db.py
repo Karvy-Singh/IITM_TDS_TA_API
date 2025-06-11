@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from fastapi import FastAPI
 import base64
+from PIL import Image
 from io import BytesIO
 
 import numpy as np
@@ -69,17 +70,50 @@ def embed_texts(texts):
     return embeddings.astype("float32")
 
 # 4) How many search hits to return:
-TOP_K = 15
+TOP_K = 25
 
 # ─────── HELPERS ───────
 
-from PIL import Image, ImageFilter, ImageOps
-import io, base64
+import re
+
+def extract_citation_indices(answer: str):
+    """
+    Finds every [...] block, splits on commas, and returns the list
+    of ints that were cited.
+    """
+    idxs = []
+    for match in re.finditer(r"\[([0-9,\s]+)\]", answer):
+        for token in match.group(1).split(","):
+            token = token.strip()
+            if token.isdigit():
+                idxs.append(int(token))
+    return sorted(set(idxs))
+
+def get_image_mimetype(base64_string):
+    try:
+        # Decode base64 string
+        image_data = base64.b64decode(base64_string)
+        image = Image.open(BytesIO(image_data))
+        format_to_mime = {
+            'JPEG': 'jpeg',
+            'PNG': 'png',
+            'WEBP': 'webp',
+            'GIF': 'gif',
+            'BMP': 'bmp',
+            'TIFF': 'tiff',
+            'ICO': 'x-icon',
+        }
+        mime_type = format_to_mime.get(image.format, 'application/octet-stream')
+    except Exception:
+        mime_type = 'application/octet-stream'
+
+    return mime_type
 
 def process_image(base64_image: str) -> str:
+    mime= get_image_mimetype(base64_image)
     prompt= [
                 {"type": "text", "text": "Please extract the text from this image. Return it exactly as it appears."},
-                {"type": "image_url", "image_url": {"url": f"{base64_image}"}}
+                {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{base64_image}"}}
             ]
     completion = client.chat.completions.create(
         model="google/gemini-2.0-flash-lite-001",     
@@ -223,7 +257,7 @@ def search_faiss(index, metadata, query, top_k=TOP_K):
         results.append((dist, meta))
     return results
 
-def generate_answer(index,metadata,question: str, k: int = 5):
+def generate_answer(index,metadata,question: str, k: int = 25):
     hits = search_faiss(index, metadata, question, top_k=k)
 
     # Build a compact context block for the LLM
@@ -249,11 +283,12 @@ def generate_answer(index,metadata,question: str, k: int = 5):
     ).choices[0].message.content
 
     # Build the links array → only the URLs that were actually cited
+    indices = extract_citation_indices(completion)
     links = []
-    for i, (_, meta) in enumerate(hits):
-        tag = f"[{i+1}]"
-        if tag in completion:
-            links.append({"url": meta["post_url"], "text": meta["topic_title"]})
+    for i in indices:
+        # our hits list is zero-based, but citations are 1-based
+        _, meta = hits[i-1]
+        links.append({"url": meta["post_url"], "text": meta["topic_title"]})
 
     return {"answer": completion, "links": links}
 
