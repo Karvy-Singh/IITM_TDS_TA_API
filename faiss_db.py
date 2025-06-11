@@ -29,7 +29,9 @@ from transformers import AutoTokenizer
 from nltk.tokenize import sent_tokenize
 
 from openai import OpenAI
-client = OpenAI(api_key="",
+from dotenv import load_dotenv
+load_dotenv()
+client = OpenAI(api_key=os.getenv("API_KEY"),
                 base_url="https://aipipe.org/openrouter/v1")
 # ─────── CONFIGURATION ───────
 
