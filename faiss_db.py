@@ -15,7 +15,6 @@ import sys
 import pickle
 from datetime import datetime
 from tqdm import tqdm
-from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
 from fastapi import FastAPI
 import base64
@@ -28,13 +27,14 @@ from sentence_transformers import SentenceTransformer
 from optimum.onnxruntime import ORTModelForCausalLM, ORTConfig
 from transformers import AutoTokenizer
 from nltk.tokenize import sent_tokenize
+
 from openai import OpenAI
 client = OpenAI(api_key="",
-                base_url="https://aiproxy.sanand.workers.dev/openai/v1")
+                base_url="https://aipipe.org/openrouter/v1")
 # ─────── CONFIGURATION ───────
 
 # 1) Path to your scraped JSON file that you generated earlier:
-SCRAPED_JSON_PATHS = ["./discourse_filtered_posts.jsonl","./course_content.jsonl"]
+SCRAPED_JSON_PATHS = ["./output.jsonl","./course_content.jsonl"]
 
 # 2) Where to save the FAISS index + metadata (so you don't rebuild every time)
 INDEX_PATH    = "tds_discourse_index.faiss"
@@ -67,7 +67,7 @@ def embed_texts(texts):
     return embeddings.astype("float32")
 
 # 4) How many search hits to return:
-TOP_K = 5
+TOP_K = 15
 
 # ─────── HELPERS ───────
 
@@ -80,7 +80,7 @@ def process_image(base64_image: str) -> str:
                 {"type": "image_url", "image_url": {"url": f"{base64_image}"}}
             ]
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",     
+        model="google/gemini-2.0-flash-lite-001",     
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2
     )
@@ -128,7 +128,7 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
                 if "topic_id" in post:
                     normalized_posts.append({
                         "content":     post.get("content",      ""),
-                        "post_url":    post.get("post_url",     ""),
+                        "post_url":    post.get("url",     ""),
                         "topic_id":    post.get("topic_id",     ""),
                         "topic_title": post.get("topic_title",  ""),
                         "post_number": post.get("post_number",  ""),
@@ -229,7 +229,6 @@ def generate_answer(index,metadata,question: str, k: int = 5):
         f"[{i+1}] {meta['snippet']}" for i, (_, meta) in enumerate(hits)
     )
 
-    
     prompt = f"""
     You are a teaching assistant. Answer the student question **concisely**,
     citing sources in the form [1], [2] … that correspond to the snippets below.
@@ -241,9 +240,8 @@ def generate_answer(index,metadata,question: str, k: int = 5):
 
     Answer:
     """
-
     completion = client.chat.completions.create(
-        model="gpt-4o-mini",     # or your Ollama model for local runs
+        model="google/gemini-2.0-flash-lite-001",     # or your Ollama model for local runs
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2
     ).choices[0].message.content
