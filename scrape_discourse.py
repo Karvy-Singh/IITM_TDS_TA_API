@@ -11,7 +11,7 @@ from requests.adapters import HTTPAdapter
 # ========== CONFIG ==========
 
 COOKIES = {
-    "_t": "xYGydsn3sg1RpkkzR919gL2x43%2BVGPWB%2BcaOlAC4HdFdFGR7F9nKBWweHVAscvlLdfnyyKEuvkFMWQnXLt6wkV8Sz3ouOFf%2B2S0XUgrR%2BDHjOcOgBcQXN7djsyfeZspIo8E6elzBk2aP3qzDOy7DO9TRN%2BsJsVBUBWK5avnONStdBXhFRfhX%2F%2FOmKemrY3rrRHruwsYPyG0Ji4ShdA%2BZ%2FczHmEa4W7LZ6NW8Q%2Bro6kwUzP0095b0PvOuv4sqd8gPqpE8PqP0Pnq5T5OsqQZ8UEWVaKLjnOcO6CdVmRaGVO9MMhVMK3VZhaYtLrs%3D--RKaBQC%2BLcKlj6P1z--BfS5jjv73HfKcJVDQtjJbA%3D%3D"
+    "_t": "YOUR_COOKIE_HERE"
 }
 
 BASE_URL = "https://discourse.onlinedegree.iitm.ac.in/c/courses/tds-kb/34"
@@ -24,7 +24,6 @@ END_DATE   = datetime(2025, 4, 14)
 
 OUTPUT_FILE = "discourse_filtered_posts.jsonl"
 
-# How many threads to use for fetching post‐chunks
 MAX_WORKERS = 4
 
 # backoff_factor used by urllib3.Retry (for exponential backoff between retries)
@@ -57,8 +56,6 @@ def safe_get(url, **kwargs):
         resp = session.get(url, **kwargs)  # one more try
     resp.raise_for_status()
     return resp
-
-# ========== HELPER FUNCTIONS ==========
 
 def get_topic_urls(base_url):
     topic_urls = set()
@@ -113,8 +110,6 @@ def parse_posts_from_topic(topic_url):
 
     return posts_data
 
-# ========== MAIN ==========
-
 def main():
     all_posts = []
     topic_urls = get_topic_urls(BASE_URL)
@@ -132,7 +127,7 @@ def main():
             json.dump(p, f)
             f.write("\n")
 
-    print(f"\n✅ Done — {len(all_posts)} posts saved to {OUTPUT_FILE}")
+    print(f"\n Done — {len(all_posts)} posts saved to {OUTPUT_FILE}")
 
 if __name__ == "__main__":
     main()

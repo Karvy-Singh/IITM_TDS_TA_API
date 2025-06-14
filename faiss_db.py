@@ -1,14 +1,3 @@
-#!/usr/bin/env python3
-"""
-test_faiss_search.py
-
-1) Load scraped posts from 'tds_discourse_posts.json'
-2) Chunk each post into ~300–500‐word snippets
-3) Embed with Sentence‐Transformers
-4) Build a FAISS index
-5) Enter a CLI loop: ask any text question → see top‐5 matching snippets (with post URLs)
-"""
-
 import json
 import os
 import sys
@@ -34,16 +23,12 @@ from dotenv import load_dotenv
 load_dotenv()
 client = OpenAI(api_key=os.getenv("API_KEY"),
                 base_url="https://aipipe.org/openrouter/v1")
-# ─────── CONFIGURATION ───────
 
-# 1) Path to your scraped JSON file that you generated earlier:
 SCRAPED_JSON_PATHS = ["./output.jsonl","./course_content.jsonl"]
 
-# 2) Where to save the FAISS index + metadata (so you don't rebuild every time)
 INDEX_PATH    = "tds_discourse_index.faiss"
 META_PATH     = "tds_discourse_metadata.pkl"
 
-# 3) Which sentence‐transformer model to use for embeddings:
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME, trust_remote_code=True)
 onnx_session = ort.InferenceSession("./all-MiniLM-L6-v2-onnx/model.onnx", providers=["CPUExecutionProvider"])
@@ -53,14 +38,11 @@ def embed_texts(texts):
     Tokenize and run texts through ONNX model, then mean-pool to get embeddings.
     Returns float32 numpy array of shape (len(texts), hidden_dim).
     """
-    # 1) Tokenize
     inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="np")
 
-    # 2) Filter to only the inputs the ONNX model actually has
     ort_input_names = {inp.name for inp in onnx_session.get_inputs()}
     onnx_inputs = {k: v for k, v in inputs.items() if k in ort_input_names}
 
-    # 3) Run
     outputs = onnx_session.run(None, onnx_inputs)[0]  # (batch, seq_len, dim)
 
     # 4) Mean‐pool
@@ -69,10 +51,8 @@ def embed_texts(texts):
     embeddings = masked.sum(axis=1) / mask.sum(axis=1)
     return embeddings.astype("float32")
 
-# 4) How many search hits to return:
-TOP_K = 25
-
-# ─────── HELPERS ───────
+# How many search hits to return:
+TOP_K = 50
 
 import re
 
@@ -116,7 +96,7 @@ def process_image(base64_image: str) -> str:
                 {"type": "image_url", "image_url": {"url": f"data:image/{mime};base64,{base64_image}"}}
             ]
     completion = client.chat.completions.create(
-        model="google/gemini-2.0-flash-lite-001",     
+        model="gpt-4o-mini",     
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2
     )
@@ -148,7 +128,6 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
     4) Embed all snippets.
     5) Build & save a single FAISS index + single metadata list.
     """
-    # 1) Load & normalize posts
     print(f"Loading JSONL from: {jsonl_paths!r}")
     normalized_posts = []
     for p in jsonl_paths:
@@ -160,7 +139,6 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
                 if not line.strip():
                     continue
                 post = json.loads(line)
-                # schema A?
                 if "topic_id" in post:
                     normalized_posts.append({
                         "content":     post.get("content",      ""),
@@ -171,7 +149,6 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
                         "created_at":  post.get("created_at",   ""),
                         "_source":     os.path.basename(p),
                     })
-                # schema B?
                 elif "content" in post and "url" in post:
                     normalized_posts.append({
                         "content":     post["content"],
@@ -183,11 +160,10 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
                         "_source":     os.path.basename(p),
                     })
                 else:
-                    # if you have other schemas, handle them here (or skip)
                     print(f"WARNING → skipping unrecognized record in {p}: {post.keys()}")
     print(f"Loaded and normalized {len(normalized_posts)} posts.")
 
-    # 2) Chunk into snippets + collect metadata
+    #  Chunk into snippets + collect metadata
     print(f"Chunking posts into snippets (max {max_len_chars} chars)…")
     all_snippets = []
     metadata     = []
@@ -208,19 +184,19 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
             }
             metadata.append(md)
 
-    # 3) Embed
+    #  Embed
     print(f"Loading SentenceTransformer('{model_name}') …")
     model = SentenceTransformer(model_name)
     print(f"Encoding {len(all_snippets)} snippets …")
     embeddings = model.encode(all_snippets, convert_to_numpy=True)
 
-    # 4) Build FAISS index
+    # Build FAISS index
     d = embeddings.shape[1]
     print(f"Building FAISS Index (dim={d}) …")
     index = faiss.IndexFlatL2(d)
     index.add(embeddings.astype("float32"))
 
-    # 5) Save index + metadata
+    # Save index + metadata
     print(f"Saving FAISS index to '{index_path}' …")
     faiss.write_index(index, index_path)
 
@@ -257,7 +233,7 @@ def search_faiss(index, metadata, query, top_k=TOP_K):
         results.append((dist, meta))
     return results
 
-def generate_answer(index,metadata,question: str, k: int = 25):
+def generate_answer(index,metadata,question: str, k: int = 50):
     hits = search_faiss(index, metadata, question, top_k=k)
 
     # Build a compact context block for the LLM
@@ -277,7 +253,7 @@ def generate_answer(index,metadata,question: str, k: int = 25):
     Answer:
     """
     completion = client.chat.completions.create(
-        model="google/gemini-2.0-flash-lite-001",     # or your Ollama model for local runs
+        model="gpt-4o-mini",     
         messages=[{"role": "user", "content": prompt}],
         temperature=0.2
     ).choices[0].message.content
@@ -293,7 +269,6 @@ def generate_answer(index,metadata,question: str, k: int = 25):
     return {"answer": completion, "links": links}
 
 app = FastAPI()
-# 1) Load tokenizer (same as HF)
 
 @app.post("/api")
 def qa_endpoint(payload: dict):
