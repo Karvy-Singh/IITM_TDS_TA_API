@@ -9,7 +9,7 @@ from google.api_core.exceptions import ResourceExhausted
 
 def extract_all_text(root_dir: str, output_jsonl: str):
     # Initialize Gemini
-    genai.configure(api_key="AIzaSyBO9xue2uWlKbHRxK4bfszWky6A5TdgL4E")
+    genai.configure(api_key="")
     model = genai.GenerativeModel(model_name="gemini-2.5-flash-lite-preview-06-17")
 
     # Regex to pull out the post_id from filenames like "post123_1.png"
