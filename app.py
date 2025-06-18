@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+"""
+test_faiss_search.py
+
+1) Load scraped posts from 'tds_discourse_posts.json'
+2) Chunk each post into ~300–500‐word snippets
+3) Embed with Sentence‐Transformers
+4) Build a FAISS index
+5) Enter a CLI loop: ask any text question → see top‐5 matching snippets (with post URLs)
+"""
+
 import json
 import os
 import sys
@@ -23,12 +34,16 @@ from dotenv import load_dotenv
 load_dotenv()
 client = OpenAI(api_key=os.getenv("API_KEY"),
                 base_url="https://aipipe.org/openrouter/v1")
+# ─────── CONFIGURATION ───────
 
-SCRAPED_JSON_PATHS = ["./output.jsonl","./course_content.jsonl"]
+# 1) Path to your scraped JSON file that you generated earlier:
+SCRAPED_JSON_PATHS = ["./finalMerged.jsonl","./course_content.jsonl"]
 
+# 2) Where to save the FAISS index + metadata (so you don't rebuild every time)
 INDEX_PATH    = "tds_discourse_index.faiss"
 META_PATH     = "tds_discourse_metadata.pkl"
 
+# 3) Which sentence‐transformer model to use for embeddings:
 EMBED_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL_NAME, trust_remote_code=True)
 onnx_session = ort.InferenceSession("./all-MiniLM-L6-v2-onnx/model.onnx", providers=["CPUExecutionProvider"])
@@ -38,11 +53,14 @@ def embed_texts(texts):
     Tokenize and run texts through ONNX model, then mean-pool to get embeddings.
     Returns float32 numpy array of shape (len(texts), hidden_dim).
     """
+    # 1) Tokenize
     inputs = tokenizer(texts, padding=True, truncation=True, return_tensors="np")
 
+    # 2) Filter to only the inputs the ONNX model actually has
     ort_input_names = {inp.name for inp in onnx_session.get_inputs()}
     onnx_inputs = {k: v for k, v in inputs.items() if k in ort_input_names}
 
+    # 3) Run
     outputs = onnx_session.run(None, onnx_inputs)[0]  # (batch, seq_len, dim)
 
     # 4) Mean‐pool
@@ -51,8 +69,10 @@ def embed_texts(texts):
     embeddings = masked.sum(axis=1) / mask.sum(axis=1)
     return embeddings.astype("float32")
 
-# How many search hits to return:
+# 4) How many search hits to return:
 TOP_K = 50
+
+# ─────── HELPERS ───────
 
 import re
 
@@ -128,6 +148,7 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
     4) Embed all snippets.
     5) Build & save a single FAISS index + single metadata list.
     """
+    # 1) Load & normalize posts
     print(f"Loading JSONL from: {jsonl_paths!r}")
     normalized_posts = []
     for p in jsonl_paths:
@@ -139,6 +160,7 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
                 if not line.strip():
                     continue
                 post = json.loads(line)
+                # schema A?
                 if "topic_id" in post:
                     normalized_posts.append({
                         "content":     post.get("content",      ""),
@@ -149,6 +171,7 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
                         "created_at":  post.get("created_at",   ""),
                         "_source":     os.path.basename(p),
                     })
+                # schema B?
                 elif "content" in post and "url" in post:
                     normalized_posts.append({
                         "content":     post["content"],
@@ -160,10 +183,11 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
                         "_source":     os.path.basename(p),
                     })
                 else:
+                    # if you have other schemas, handle them here (or skip)
                     print(f"WARNING → skipping unrecognized record in {p}: {post.keys()}")
     print(f"Loaded and normalized {len(normalized_posts)} posts.")
 
-    #  Chunk into snippets + collect metadata
+    # 2) Chunk into snippets + collect metadata
     print(f"Chunking posts into snippets (max {max_len_chars} chars)…")
     all_snippets = []
     metadata     = []
@@ -184,19 +208,19 @@ def build_index(jsonl_paths, model_name, index_path, meta_path, max_len_chars=50
             }
             metadata.append(md)
 
-    #  Embed
+    # 3) Embed
     print(f"Loading SentenceTransformer('{model_name}') …")
     model = SentenceTransformer(model_name)
     print(f"Encoding {len(all_snippets)} snippets …")
     embeddings = model.encode(all_snippets, convert_to_numpy=True)
 
-    # Build FAISS index
+    # 4) Build FAISS index
     d = embeddings.shape[1]
     print(f"Building FAISS Index (dim={d}) …")
     index = faiss.IndexFlatL2(d)
     index.add(embeddings.astype("float32"))
 
-    # Save index + metadata
+    # 5) Save index + metadata
     print(f"Saving FAISS index to '{index_path}' …")
     faiss.write_index(index, index_path)
 
@@ -244,12 +268,10 @@ def generate_answer(index,metadata,question: str, k: int = 50):
     prompt = f"""
     You are a teaching assistant. Answer the student question **concisely**,
     citing sources in the form [1], [2] … that correspond to the snippets below.
-
+    **DO NOT HALLUCINATE**
     Question: {question}
-
     Snippets:
     {context}
-
     Answer:
     """
     completion = client.chat.completions.create(
@@ -269,6 +291,7 @@ def generate_answer(index,metadata,question: str, k: int = 50):
     return {"answer": completion, "links": links}
 
 app = FastAPI()
+# 1) Load tokenizer (same as HF)
 
 @app.post("/api")
 def qa_endpoint(payload: dict):
@@ -288,50 +311,3 @@ def qa_endpoint(payload: dict):
 
     response = generate_answer(index, metadata, question)
     return response
-
-# if __name__ == "__main__":
-#     # ─────── 1) Try to load an existing index & metadata ───────
-#     index, metadata = load_index_and_meta(INDEX_PATH, META_PATH)
-# 
-#     # If not foun/d on disk, build it from the scraped JSON
-#     if index is None or metadata is None:
-#         index, metadata = build_index(
-#             jsonl_paths=SCRAPED_JSON_PATHS,
-#             model_name=EMBED_MODEL_NAME,
-#             index_path=INDEX_PATH,
-#             meta_path=META_PATH
-#         )
-# 
-#     # Load the same SentenceTransformer model for querying
-#     model = SentenceTransformer(EMBED_MODEL_NAME)
-# 
-#     print("\n====== FAISS SEARCH READY ======\n")
-# 
-#     # ─────── 2) Enter interactive loop for user questions ───────
-#     print("Type a question (or 'exit' to quit):")
-#     while True:
-#         query = input("\n> ").strip()
-#         if query.lower() in ("exit", "quit"):
-#             print("Exiting.")
-#             break
-# 
-#         ans=generate_answer(index,metadata,model,query)
-#         print("answer:", ans["answer"])
-#         print()
-#         print("links", ans["links"])
-
-#         # 3) Perform search
-#         hits = search_faiss(index, metadata, model, query, top_k=TOP_K)
-#         print(f"\nTop {TOP_K} matches:\n")
-#         for rank, (dist, meta) in enumerate(hits, start=1):
-#             print(f"--- Rank #{rank}  (score: {dist:.4f}) ---")
-#             print(f"Topic ID   : {meta['topic_id']}")
-#             print(f"Topic Title: {meta['topic_title']}")
-#             print(f"Post #     : {meta['post_number']}")
-#             print(f"Created At : {meta['created_at']}")
-#             print(f"URL        : {meta['post_url']}")
-#             snippet = meta["snippet"]
-#             print(f"Snippet    : {snippet[:200].strip()}{'…' if len(snippet)>200 else ''}")
-#             print()
-#         print("───────────────────────────────────────")
-
